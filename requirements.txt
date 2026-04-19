@@ -1,3 +1,7 @@
-openai
 dotenv
-vk-api
+psycopg[binary]
+vk_api
+pymorphy3
+sentence_transformers
+faiss-cpu
+openai
