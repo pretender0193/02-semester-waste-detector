@@ -2,6 +2,7 @@ from vk_api import VkApi
 from postgres_utils import connect_pgsql
 from re import compile as re_compile
 from pymorphy3 import MorphAnalyzer
+from openai import OpenAI
 
 
 _DEFAULT_COMMUNITY_CATEGORY_STOP_WORDS = ["бизнес", "видеоигра", "животное", "знакомство", "игра", "история", "кафе", "музыка", "передача",
@@ -186,9 +187,38 @@ def filter_vk_communities_semantically(
     return filtered_communities
 
 
+def get_new_vk_community_queries(
+    queries: list[str],
+    openai_api: str,
+    openai_api_key: str,
+    openai_model: str
+) -> list[str]:
+    client = OpenAI(base_url=openai_api, api_key=openai_api_key)
+    text = ", ".join(queries)
+    resp = client.chat.completions.create(
+        model=openai_model,
+        temperature=1.0,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Тебе дан список запросов для поиска сообществ в социальной сети, они расположены в порядке убывания количества полезных сообществ, найденных по каждому запросу. Придумай новые запросы, которые могут быть полезны для поиска сообществ."
+                    "Отвечай только новыми запросами, не повторяй старые. Каждый запрос должен быть отделен запятой. Новые запросы должны быть максимально релевантными и разнообразными, не должны быть синонимами друг друга и не должны быть слишком похожими на уже имеющиеся запросы."
+                ),
+            },
+            {"role": "user", "content": text},
+        ],
+    )
+
+    return resp.choices[0].message.content.strip().split(", ")
+
+
 def refresh_vk_monitor_polling_list(
     api_key: str,
     state_dsn: str,
+    openai_api: str,
+    openai_api_key: str,
+    openai_model: str,
     count_per_query: int = 100,
     community_category_stop_words: list[str] = _DEFAULT_COMMUNITY_CATEGORY_STOP_WORDS,
     community_positive_keywords: list[str] = _DEFAULT_COMMUNITY_POSITIVE_WORDS,
@@ -218,6 +248,28 @@ def refresh_vk_monitor_polling_list(
                 "WHERE is_active = TRUE"
             )
             search_queries = [row[0] for row in cur.fetchall()]
+
+            if not search_queries:
+                cur.execute(
+                    "SELECT sq.query, COUNT(pl.group_id) AS community_count\n"
+                    "FROM vk_monitor_seen_queries sq\n"
+                    "JOIN vk_monitor_polling_list pl ON sq.group_id = pl.group_id\n"
+                    "GROUP BY sq.query\n"
+                    "ORDER BY community_count DESC",
+                )
+                search_queries = [row[0] for row in cur.fetchall()[:100]]
+                new_search_queries = get_new_vk_community_queries(
+                    queries=search_queries,
+                    openai_api=openai_api,
+                    openai_api_key=openai_api_key,
+                    openai_model=openai_model
+                )
+                cur.executemany(
+                    "INSERT INTO vk_monitor_queries (query) "
+                    "VALUES (%s) ON CONFLICT (query) DO NOTHING",
+                    [(query,) for query in new_search_queries],
+                )
+                search_queries = new_search_queries.copy()
 
     new_communities = get_new_vk_communities(
         api_key=api_key,
