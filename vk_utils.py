@@ -184,3 +184,91 @@ def filter_vk_communities_semantically(
                                 (group_id,),
                             )
     return filtered_communities
+
+
+def refresh_vk_monitor_polling_list(
+    api_key: str,
+    state_dsn: str,
+    count_per_query: int = 100,
+    community_category_stop_words: list[str] = _DEFAULT_COMMUNITY_CATEGORY_STOP_WORDS,
+    community_positive_keywords: list[str] = _DEFAULT_COMMUNITY_POSITIVE_WORDS,
+    community_negative_keywords: list[str] = _DEFAULT_COMMUNITY_NEGATIVE_WORDS,
+    db_timeout_seconds: int = 10,
+) -> bool:
+    default_search_queries = ["подслушано", "район"]
+    default_community = 237677627
+
+    with connect_pgsql(state_dsn, timeout_seconds=db_timeout_seconds) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS vk_monitor_queries ("
+                "query TEXT PRIMARY KEY, "
+                "is_active BOOLEAN NOT NULL DEFAULT TRUE "
+                ")"
+            )
+            cur.execute("SELECT 1 FROM vk_monitor_queries LIMIT 1")
+            if cur.fetchone() is None:
+                cur.executemany(
+                    "INSERT INTO vk_monitor_queries (query) "
+                    "VALUES (%s) ON CONFLICT (query) DO NOTHING",
+                    [(query,) for query in default_search_queries],
+                )
+            cur.execute(
+                "SELECT query FROM vk_monitor_queries "
+                "WHERE is_active = TRUE"
+            )
+            search_queries = [row[0] for row in cur.fetchall()]
+
+    new_communities = get_new_vk_communities(
+        api_key=api_key,
+        queries=search_queries,
+        state_dsn=state_dsn,
+        count_per_query=count_per_query,
+        db_timeout_seconds=db_timeout_seconds,
+    )
+    filtered_stage_1 = filter_vk_communities_by_category_stop_words(
+        communities=new_communities,
+        state_dsn=state_dsn,
+        stop_words=community_category_stop_words,
+        db_timeout_seconds=db_timeout_seconds,
+    )
+    filtered_stage_2 = filter_vk_communities_semantically(
+        api_key=api_key,
+        communities=filtered_stage_1,
+        state_dsn=state_dsn,
+        positive_keywords=community_positive_keywords,
+        negative_keywords=community_negative_keywords,
+        db_timeout_seconds=db_timeout_seconds,
+    )
+
+    if not filtered_stage_2:
+        return False
+
+    with connect_pgsql(state_dsn, timeout_seconds=db_timeout_seconds) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS vk_monitor_polling_list ("
+                "group_id BIGINT PRIMARY KEY"
+                ")"
+            )
+            cur.execute("SELECT 1 FROM vk_monitor_polling_list LIMIT 1")
+            if cur.fetchone() is None:
+                cur.execute(
+                    "INSERT INTO vk_monitor_polling_list (group_id) "
+                    "VALUES (%s) ON CONFLICT (group_id) DO NOTHING",
+                    (default_community,),
+                )
+            values = [
+                (community.get("id"),)
+                for community in filtered_stage_2
+                if community.get("id") is not None
+            ]
+            if values:
+                cur.executemany(
+                    "INSERT INTO vk_monitor_polling_list (group_id) "
+                    "VALUES (%s) "
+                    "ON CONFLICT (group_id) DO NOTHING",
+                    values,
+                )
+
+    return True
