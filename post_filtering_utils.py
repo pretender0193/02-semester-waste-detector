@@ -9,6 +9,8 @@ def filter_posts_with_faiss(
     target_phrase: str = "мусор около железной дороги",
     threshold: float = 0.3
 ) -> list[dict[str, object]]:
+    if not posts:
+        return []
     embedder = SentenceTransformer(
         "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
     )
