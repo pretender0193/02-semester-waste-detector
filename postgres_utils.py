@@ -36,3 +36,49 @@ def connect_pgsql(
                 f"Запрос к БД выполнялся или ожидал блокировки дольше {timeout_seconds} с."
             ) from exc
         raise
+
+
+def insert_relevant_messages(
+    state_dsn: str,
+    messages: list[dict[str, object]],
+    source: str,
+    schema_name: str = _DEFAULT_PGSQL_SCHEMA_NAME,
+    timeout_seconds: int = 10,
+) -> int:
+    rows = [
+        (
+            msg["group_id"],
+            msg["post_id"],
+            msg["text"],
+            msg.get("latitude"),
+            msg.get("longitude"),
+            source,
+        )
+        for msg in messages
+    ]
+
+    insert_sql = (
+        "INSERT INTO relevant_messages "
+        "(group_id, post_id, text, latitude, longitude, source) "
+        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT DO NOTHING"
+    )
+
+    with connect_pgsql(
+        state_dsn, schema_name=schema_name, timeout_seconds=timeout_seconds
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS relevant_messages ("
+                "group_id BIGINT, "
+                "post_id BIGINT,"
+                "text TEXT, "
+                "latitude FLOAT, "
+                "longitude FLOAT, "
+                "source TEXT, "
+                "PRIMARY KEY (group_id, post_id)"
+                ")"
+            )
+            cur.executemany(insert_sql, rows)
+            return cur.rowcount
+    return 0
