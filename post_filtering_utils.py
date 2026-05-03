@@ -5,14 +5,15 @@ from openai import OpenAI
 
 
 def filter_posts_with_faiss(
-    posts: list[str],
+    posts: list[dict[str, object]],
     target_phrase: str = "мусор около железной дороги",
     threshold: float = 0.3
-) -> list[str]:
+) -> list[dict[str, object]]:
     embedder = SentenceTransformer(
         "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
     )
-    post_vecs = embedder.encode(posts, normalize_embeddings=True)
+    texts = [str(post.get("text", "")) for post in posts]
+    post_vecs = embedder.encode(texts, normalize_embeddings=True)
     query_vec = embedder.encode([target_phrase], normalize_embeddings=True)
     post_embeds = np_array(post_vecs, dtype=np_float32)
     query_embed = np_array(query_vec, dtype=np_float32)
@@ -33,11 +34,11 @@ def filter_posts_with_faiss(
 
 
 def filter_posts_with_llm(
-    posts: list[str],
+    posts: list[dict[str, object]],
     openai_api: str,
     openai_api_key: str,
     openai_model: str
-) -> list[str]:
+) -> list[dict[str, object]]:
     def _normalize_answer(raw_text: str) -> str:
         text = (raw_text).strip().lower()
         for char in ".,!?;:\n\r\t\"'()[]{}":
@@ -55,7 +56,7 @@ def filter_posts_with_llm(
     client = OpenAI(base_url=openai_api, api_key=openai_api_key)
     filtered_posts = []
     for post in posts:
-        text = post[:1500]
+        text = str(post.get("text", ""))[:1500]
         resp = client.chat.completions.create(
             model=openai_model,
             temperature=0,

@@ -144,9 +144,8 @@ def filter_vk_communities_semantically(
                     "description": group_data.get("description"),
                 }
 
-                owner_id = -int(community.get("id"))
                 group_posts = api.wall.get(
-                    owner_id=owner_id, count=100)["items"]
+                    owner_id=-int(community.get("id")), count=100)["items"]
                 community_bundles[community.get("id")]["pin_post"] = group_posts[0].get(
                     "text") if group_posts[0].get("is_pinned") == 1 else ""
 
@@ -300,7 +299,8 @@ def refresh_vk_monitor_polling_list(
         with conn.cursor() as cur:
             cur.execute(
                 "CREATE TABLE IF NOT EXISTS vk_monitor_polling_list ("
-                "group_id BIGINT PRIMARY KEY"
+                "group_id BIGINT PRIMARY KEY, "
+                "last_read_post_id BIGINT"
                 ")"
             )
             cur.execute("SELECT 1 FROM vk_monitor_polling_list LIMIT 1")
@@ -324,3 +324,81 @@ def refresh_vk_monitor_polling_list(
                 )
 
     return True
+
+
+def poll_vk_new_messages(
+    api_key: str,
+    state_dsn: str,
+    count_per_community: int = 100,
+    db_timeout_seconds: int = 10,
+) -> list[dict[str, object]]:
+    api = VkApi(token=api_key, api_version="5.199").get_api()
+    new_messages = []
+
+    with connect_pgsql(state_dsn, timeout_seconds=db_timeout_seconds) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT group_id, last_read_post_id FROM vk_monitor_polling_list"
+            )
+            communities = [(int(row[0]), row[1]) for row in cur.fetchall()]
+
+            for group_id, last_read_post_id in communities:
+                owner_id = -int(group_id)
+                latest_post = api.wall.get(
+                    owner_id=owner_id,
+                    count=1,
+                ).get("items", [])
+                if not latest_post:
+                    continue
+
+                latest_post_id = latest_post[0].get("id")
+                if latest_post_id is None:
+                    continue
+                if last_read_post_id is None:
+                    cur.execute(
+                        "UPDATE vk_monitor_polling_list "
+                        "SET last_read_post_id = %s "
+                        "WHERE group_id = %s",
+                        (int(latest_post_id), group_id),
+                    )
+                    continue
+
+                remaining = latest_post_id - last_read_post_id
+                offset = 0
+                while remaining > 0:
+                    batch_size = min(remaining, count_per_community)
+                    posts = api.wall.get(
+                        owner_id=owner_id,
+                        count=batch_size,
+                        offset=offset,
+                    ).get("items", [])
+                    if not posts:
+                        break
+
+                    for post in posts:
+                        post_id = post.get("id")
+                        if post_id is None or int(post_id) <= last_read_post_id:
+                            break
+                        new_messages.append(
+                            {
+                                "group_id": group_id,
+                                "post_id": int(post_id),
+                                "text": post.get("text", ""),
+                                "latitude": post.get("geo", {}).get("coordinates", {}).split()[0] if post.get("geo", {}).get("coordinates") else None,
+                                "longitude": post.get("geo", {}).get("coordinates", {}).split()[1] if post.get("geo", {}).get("coordinates") else None
+                            }
+                        )
+
+                    offset += len(posts)
+                    remaining -= len(posts)
+                    if len(posts) < batch_size:
+                        break
+
+                cur.execute(
+                    "UPDATE vk_monitor_polling_list "
+                    "SET last_read_post_id = %s "
+                    "WHERE group_id = %s",
+                    (latest_post_id, group_id),
+                )
+
+    return new_messages
